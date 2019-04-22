@@ -6,15 +6,17 @@
 
 
 require 'rexle'
+require 'base64'
 require 'rxfhelper'
+require "mini_magick"
 require 'rexle-builder'
-
 
 
 class StepsRecorderAnalyser
   using ColouredText
 
   attr_reader :steps
+  
 
   def initialize(s, debug: false)
 
@@ -78,13 +80,30 @@ class StepsRecorderAnalyser
 
     Rexle.new(xml.to_a)    
   end
+  
+  def extract_image(s, e)
+        
+    y, x, w, h = e.text.split(',').map(&:to_i)
 
-  def parse_steps(s2)
+    jpg_file = e.parent.element('ScreenshotFileName/text()')
+    img_data = s[/(?<=Content-Location: #{jpg_file}\r\n\r\n)[^--]+/m]    
+    puts ('img_data: ' + img_data.inspect).debug if @debug
+    
+    image = MiniMagick::Image.read Base64.decode64(img_data.rstrip)
+    
+    # crop along the red boundary and remove the red boundary
+    image.crop "%sx%s+%s+%s" % [w - 5, h - 5, x + 3, y + 3]
+    image.to_blob
+    
+  end
 
-    s = s2[/Recording Session.*(?=<)/]
+  def parse_steps(s)
+
+    s2 = s[/Recording Session.*(?=<)/]
     puts ('s: ' + s.inspect).debug if @debug    
 
-    raw_steps = s.split(/(?=Step \d+:)/)
+    report = Rexle.new s[/<Report>.*<\/Report>/m]    
+    raw_steps = s2.split(/(?=Step \d+:)/)
     summary = raw_steps.shift
 
     raw_steps.map do |entry|
@@ -94,18 +113,26 @@ class StepsRecorderAnalyser
       keys = raw_keys ? raw_keys.gsub('...','').split : []
 
       raw_comment = a[0][/User Comment: (.*)/,1]
+      
+      n = a[0][/(?<=Step )\d+/]      
+      puts ('n: ' + n.inspect).debug if @debug
 
       if raw_comment then
+        
 
+        e = report.root.element('UserActionData/RecordSession/EachAction' + 
+                                "[@ActionNumber='#{n}']/HighlightXYWH")
+        
         {
-          step: a[0][/(?<=Step )\d+/],
-          user_comment: raw_comment.gsub("&quot;",'"')
+          step: n,
+          user_comment: raw_comment.gsub("&quot;",'"'),
+          screenshot: extract_image(s, e)
         }
 
       else
       
         {
-          step: a[0][/(?<=Step )\d+/],
+          step: n,
           desc: a[0][/(?:Step \d+: )(.*)/,1].gsub("&quot;",'"'),
           keys: keys ,
           program: a[1][/(?<=Program: ).*/],
