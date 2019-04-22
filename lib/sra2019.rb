@@ -10,6 +10,7 @@ require 'zip'
 require 'rexle'
 require 'base64'
 require 'rxfhelper'
+require 'wicked_pdf'
 require 'mini_magick'
 require 'rexle-builder'
 
@@ -92,6 +93,19 @@ EOF
         {|x| File.write File.join(csspath, "%s.css" % x), ''}
     
     'saved'
+    
+  end
+  
+  def to_pdf()
+    
+    project = 'sra' + Time.now.to_i.to_s
+    newdir = project
+    pdf_file = File.join(@savepath, project, @title.gsub(/ /,'-') + '.pdf')
+    html_file = File.join(@savepath, project, 'index.html')
+    
+    to_html(newdir)    
+    pdf = WickedPdf.new.pdf_from_html_file(html_file)
+    File.write pdf_file, pdf
     
   end
   
