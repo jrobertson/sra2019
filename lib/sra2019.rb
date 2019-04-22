@@ -5,10 +5,12 @@
 # description: Steps Recorder (MS Windows) Analyser 2019
 
 
+require 'hlt'
+require 'zip'
 require 'rexle'
 require 'base64'
 require 'rxfhelper'
-require "mini_magick"
+require 'mini_magick'
 require 'rexle-builder'
 
 
@@ -18,13 +20,15 @@ class StepsRecorderAnalyser
   attr_reader :steps
   
 
-  def initialize(s, debug: false)
+  def initialize(s, debug: false, savepath: '/tmp', title: 'Untitled')
 
-    @debug = debug
+    @savepath, @title, @debug = savepath, title, debug
     content = RXFHelper.read(s).first
     puts ('content: ' + content.inspect).debug if @debug
-    @steps = parse_steps  content  
-    @doc = build @steps
+    
+    all_steps = parse_steps  content  
+    @doc = build all_steps
+    @steps = all_steps.select {|x| x[:user_comment]}
 
   end
 
@@ -33,6 +37,80 @@ class StepsRecorderAnalyser
 
     @doc.xml options
 
+  end
+  
+  def to_html(targetdir='sra' + Time.now.to_i.to_s)
+    
+    # save the image files to a file directory.
+    # name the sub-directory using the date and time?
+
+    filepath = File.join(@savepath, targetdir)
+    imgpath = File.join(filepath, 'images')
+    csspath = File.join(filepath, 'css')
+    
+    [filepath, imgpath, csspath].each {|x|  FileUtils.mkdir x}
+
+    @steps.each.with_index do |x, i|
+      
+      File.open(File.join(imgpath, "screenshot#{i}.jpg" ), 'wb') \
+        {|f| f.write(x[:screenshot]) }
+
+    end
+    
+
+    rows = @steps.map.with_index do |x, i|
+
+li = "
+      li
+        markdown:
+          #{x[:user_comment]}
+          
+          ![](images/screenshot#{i}.jpg)
+"         
+    
+    end
+
+html=<<EOF
+html
+  head
+    title #{@title}: #{@steps.length} Steps (with Pictures)    
+    link rel='stylesheet' type='text/css' href='css/layout.css' media='screen,  projection, tv'
+    link rel='stylesheet' type='text/css' href='css/style.css' media='screen,  projection, tv'
+    link rel='stylesheet' type='text/css' href='css/print.css' media='print'
+  body
+    h1 #{@title}
+
+    ol
+      #{rows.join("\n").lstrip}
+EOF
+
+    html = Rexle.new(Hlt.new(html).to_html)\
+        .root.element('html').xml pretty: true
+    File.write File.join(filepath, 'index.html'), html
+
+    %w(layout style print).each \
+        {|x| File.write File.join(csspath, "%s.css" % x), ''}
+    
+    'saved'
+    
+  end
+  
+  # not yet working properly
+  #
+  def to_zip()
+    
+    project = 'sra' + Time.now.to_i.to_s
+    newdir = project
+    zipfile = project + '.zip'
+    
+    to_html(newdir)    
+
+    Zip::ZipFile.open(zipfile, Zip::ZipFile::CREATE) do |x|
+      x.add(project, File.join(@savepath, project))
+    end
+    
+    'saved to ' + File.join(@savepath, zipfile)
+    
   end
 
   private
@@ -81,8 +159,13 @@ class StepsRecorderAnalyser
     Rexle.new(xml.to_a)    
   end
   
-  def extract_image(s, e)
-        
+  def extract_image(s, n)
+    
+    report = Rexle.new s[/<Report>.*<\/Report>/m]        
+    
+    e = report.root.element('UserActionData/RecordSession/EachAction' + 
+                            "[@ActionNumber='#{n}']/HighlightXYWH")
+            
     y, x, w, h = e.text.split(',').map(&:to_i)
 
     jpg_file = e.parent.element('ScreenshotFileName/text()')
@@ -102,7 +185,6 @@ class StepsRecorderAnalyser
     s2 = s[/Recording Session.*(?=<)/]
     puts ('s: ' + s.inspect).debug if @debug    
 
-    report = Rexle.new s[/<Report>.*<\/Report>/m]    
     raw_steps = s2.split(/(?=Step \d+:)/)
     summary = raw_steps.shift
 
@@ -117,16 +199,12 @@ class StepsRecorderAnalyser
       n = a[0][/(?<=Step )\d+/]      
       puts ('n: ' + n.inspect).debug if @debug
 
-      if raw_comment then
-        
-
-        e = report.root.element('UserActionData/RecordSession/EachAction' + 
-                                "[@ActionNumber='#{n}']/HighlightXYWH")
+      if raw_comment then        
         
         {
           step: n,
-          user_comment: raw_comment.gsub("&quot;",'"'),
-          screenshot: extract_image(s, e)
+          user_comment: raw_comment.gsub("&quot;",''),
+          screenshot: extract_image(s, n)
         }
 
       else

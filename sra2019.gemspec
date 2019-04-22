@@ -1,10 +1,10 @@
 Gem::Specification.new do |s|
   s.name = 'sra2019'
-  s.version = '0.3.0'
+  s.version = '0.4.0'
   s.summary = 'Steps Recorder (MS Windows) Analyser 2019'
   s.authors = ['James Robertson']
   s.files = Dir['lib/sra2019.rb']
-  s.add_runtime_dependency('rexle', '~> 1.5', '>=1.5.1')
+  s.add_runtime_dependency('hlt', '~> 0.6', '>=0.6.3')
   s.add_runtime_dependency('mini_magick', '~> 4.9', '>=4.9.3')    
   s.signing_key = '../privatekeys/sra2019.pem'
   s.cert_chain  = ['gem-public_cert.pem']
