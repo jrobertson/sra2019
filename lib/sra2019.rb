@@ -6,13 +6,15 @@
 
 
 require 'hlt'
-require 'zip'
 require 'rexle'
 require 'base64'
 require 'rxfhelper'
 require 'wicked_pdf'
 require 'mini_magick'
+require 'archive/zip'
 require 'rexle-builder'
+
+
 
 
 class StepsRecorderAnalyser
@@ -40,12 +42,11 @@ class StepsRecorderAnalyser
 
   end
   
-  def to_html(targetdir='sra' + Time.now.to_i.to_s)
+  def to_html(filepath=File.join(@savepath, 'sra' + Time.now.to_i.to_s))
     
     # save the image files to a file directory.
     # name the sub-directory using the date and time?
 
-    filepath = File.join(@savepath, targetdir)
     imgpath = File.join(filepath, 'images')
     csspath = File.join(filepath, 'css')
     
@@ -71,7 +72,7 @@ li = "
     
     end
 
-html=<<EOF
+@sliml=<<EOF
 html
   head
     title #{@title}: #{@steps.length} Steps (with Pictures)    
@@ -85,7 +86,7 @@ html
       #{rows.join("\n").lstrip}
 EOF
 
-    html = Rexle.new(Hlt.new(html).to_html)\
+    html = Rexle.new(Hlt.new(@sliml).to_html)\
         .root.element('html').xml pretty: true
     File.write File.join(filepath, 'index.html'), html
 
@@ -94,6 +95,10 @@ EOF
     
     'saved'
     
+  end
+  
+  def to_sliml()
+    @sliml
   end
   
   def to_pdf()
@@ -114,16 +119,14 @@ EOF
   def to_zip()
     
     project = 'sra' + Time.now.to_i.to_s
-    newdir = project
-    zipfile = project + '.zip'
+    newdir = File.join(@savepath, project)
+    zipfile = File.join(@savepath, project + '.zip')
     
     to_html(newdir)    
 
-    Zip::ZipFile.open(zipfile, Zip::ZipFile::CREATE) do |x|
-      x.add(project, File.join(@savepath, project))
-    end
+    Archive::Zip.archive(zipfile, File.join(@savepath, project))
     
-    'saved to ' + File.join(@savepath, zipfile)
+    'saved to ' +  zipfile
     
   end
 
@@ -172,6 +175,7 @@ EOF
 
     Rexle.new(xml.to_a)    
   end
+  
   
   def extract_image(s, n)
     
