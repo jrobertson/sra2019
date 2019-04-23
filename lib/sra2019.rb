@@ -8,12 +8,12 @@
 require 'hlt'
 require 'rexle'
 require 'base64'
+require 'zip/zip'
 require 'rxfhelper'
 require 'wicked_pdf'
 require 'mini_magick'
 require 'archive/zip'
 require 'rexle-builder'
-
 
 
 
@@ -26,7 +26,15 @@ class StepsRecorderAnalyser
   def initialize(s, debug: false, savepath: '/tmp', title: 'Untitled')
 
     @savepath, @title, @debug = savepath, title, debug
-    content = RXFHelper.read(s).first
+    
+    raw_content, type = RXFHelper.read(s)
+    
+    content = if type == :file and File.extname(s) == '.zip' then
+      Zip::ZipFile.new(s).instance_eval {read(to_a[0].name)}
+    else
+      raw_content
+    end
+
     puts ('content: ' + content.inspect).debug if @debug
     
     all_steps = parse_steps  content  
@@ -101,30 +109,28 @@ EOF
     @sliml
   end
   
-  def to_pdf()
+  def to_pdf(pdf_file=File.join(@savepath, 'sra' + Time.now.to_i.to_s, 
+                              @title.gsub(/ /,'-') + '.pdf'))
     
-    project = 'sra' + Time.now.to_i.to_s
-    newdir = project
-    pdf_file = File.join(@savepath, project, @title.gsub(/ /,'-') + '.pdf')
-    html_file = File.join(@savepath, project, 'index.html')
+    dir = File.dirname(pdf_file)
+    html_file = File.join(dir, 'index.html')
     
-    to_html(newdir)    
+    to_html(dir)
     pdf = WickedPdf.new.pdf_from_html_file(html_file)
     File.write pdf_file, pdf
     
   end
   
-  # not yet working properly
-  #
+
   def to_zip()
     
     project = 'sra' + Time.now.to_i.to_s
     newdir = File.join(@savepath, project)
-    zipfile = File.join(@savepath, project + '.zip')
+    zipfile = newdir + '.zip'
     
-    to_html(newdir)    
+    to_pdf(File.join(newdir, @title.gsub(/ /,'-') + '.pdf'))    
 
-    Archive::Zip.archive(zipfile, File.join(@savepath, project))
+    Archive::Zip.archive(zipfile, newdir)
     
     'saved to ' +  zipfile
     
