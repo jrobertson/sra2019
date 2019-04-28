@@ -8,7 +8,10 @@
 require 'hlt'
 require 'rexle'
 require 'base64'
+require 'ostruct'
+require 'subunit'
 require 'zip/zip'
+require 'dynarex'
 require 'rxfhelper'
 require 'wicked_pdf'
 require 'mini_magick'
@@ -16,11 +19,21 @@ require 'archive/zip'
 require 'rexle-builder'
 
 
+module TimeHelper
+
+  refine String do
+    def to_time()
+      Time.strptime(self, "%H:%M:%S")
+    end
+  end
+
+end
 
 class StepsRecorderAnalyser
   using ColouredText
+  using TimeHelper
 
-  attr_reader :steps
+  attr_reader :steps, :start_time, :stop_time
   
 
   def initialize(s, debug: false, savepath: '/tmp', title: 'Untitled')
@@ -37,10 +50,37 @@ class StepsRecorderAnalyser
 
     puts ('content: ' + content.inspect).debug if @debug
     
-    all_steps = parse_steps  content  
-    @doc = build all_steps
-    @steps = all_steps.select {|x| x[:user_comment]}
+    @actions = parse_report content
+    @all_steps = parse_steps  content  
+    @doc = build @all_steps
+    steps = @all_steps.select {|x| x[:user_comment]}
+    @steps = steps.any? ? steps : @all_steps
 
+  end
+
+  def import(s)
+    
+    @dx = Dynarex.new
+    @dx.import s
+    
+  end
+  
+  # Returns a Dynarex object
+  #
+  def to_dx()
+    
+    @dx = Dynarex.new 'instructions/instruction(step, imgsrc, description)'
+    @dx.summary[:rawdoc_type] = 'rowx'
+    
+    @steps.each.with_index do |h, i|
+      
+      @dx.create step: i+1, imgsrc: "screenshot#{i+1}.jpg", 
+          description: h[:user_comment] || h[:desc]
+      
+    end
+    
+    @dx
+    
   end
 
   def to_kbml(options={})
@@ -50,6 +90,9 @@ class StepsRecorderAnalyser
 
   end
   
+
+  # Writes the steps to an HTML file
+  #
   def to_html(filepath=File.join(@savepath, 'sra' + Time.now.to_i.to_s))
     
     # save the image files to a file directory.
@@ -95,7 +138,9 @@ html
 EOF
 
     html = Rexle.new(Hlt.new(@sliml).to_html)\
-        .root.element('html').xml pretty: true
+        .root.element('html').xml pretrequire 'requestor'
+eval Requestor.read('http://a0.jamesrobertson.eu/rorb/r/ruby'){|x| x.require 'sra2019' }
+ty: true
     File.write File.join(filepath, 'index.html'), html
 
     %w(layout style print).each \
@@ -109,6 +154,43 @@ EOF
     @sliml
   end
   
+  def to_srt()
+
+    lines = to_subtitles.strip.lines.map.with_index do |x, i|
+
+      raw_times, subtitle = x.split(/ /,2)
+      
+      start_time, end_time = raw_times.split('-',2)
+      times = [("%02d:%02d:%02d" % ([0, 0 ] + start_time.split(/\D/)\
+                                    .map(&:to_i)).reverse.take(3).reverse), \
+               '-->', \
+              ("%02d:%02d:%02d" % ([0, 0 ] + end_time.split(/\D/).map(&:to_i))\
+               .reverse.take(3).reverse)].join(' ')
+
+      [i+1, times, subtitle].join("\n")
+
+    end
+
+    lines.join("\n")    
+    
+  end
+  
+  def to_subtitles()
+    
+    times = @all_steps.map(&:time).each_cons(2).map do |x|
+
+      x.map do |sec|
+        a = Subunit.new(units={minutes:60, hours:60}, seconds: sec).to_h.to_a
+        a.map {|x|"%d%s" % [x[1], x[0][0]] }.join('')
+      end.join('-')
+      
+    end
+    times.zip(@all_steps.map(&:desc)).map {|x| x.join(' ')}.join("\n")
+                          
+  end
+  
+  # Writes the steps to a PDF file
+  #
   def to_pdf(pdf_file=File.join(@savepath, 'sra' + Time.now.to_i.to_s, 
                               @title.gsub(/ /,'-') + '.pdf'))
     
@@ -121,18 +203,20 @@ EOF
     
   end
   
-
+  # Compresses the HTML file directory to a ZIP file
+  #
   def to_zip()
     
     project = 'sra' + Time.now.to_i.to_s
     newdir = File.join(@savepath, project)
     zipfile = newdir + '.zip'
     
-    to_pdf(File.join(newdir, @title.gsub(/ /,'-') + '.pdf'))    
+    to_html(File.join(newdir))    
+    #to_pdf(File.join(newdir, @title.gsub(/ /,'-') + '.pdf'))    
 
     Archive::Zip.archive(zipfile, newdir)
     
-    'saved to ' +  zipfile
+    zipfile
     
   end
 
@@ -184,15 +268,16 @@ EOF
   
   
   def extract_image(s, n)
-    
-    report = Rexle.new s[/<Report>.*<\/Report>/m]        
-    
-    e = report.root.element('UserActionData/RecordSession/EachAction' + 
-                            "[@ActionNumber='#{n}']/HighlightXYWH")
-            
+        
+    action = @actions[n-1]          
+    puts 'action: ' + action.inspect if @debug
+    e = action.element('HighlightXYWH')
+    return unless e
     y, x, w, h = e.text.split(',').map(&:to_i)
 
-    jpg_file = e.parent.element('ScreenshotFileName/text()')
+    jpg_file = action.element('ScreenshotFileName/text()')
+    return unless jpg_file
+    
     img_data = s[/(?<=Content-Location: #{jpg_file}\r\n\r\n)[^--]+/m]    
     puts ('img_data: ' + img_data.inspect).debug if @debug
     
@@ -201,6 +286,23 @@ EOF
     # crop along the red boundary and remove the red boundary
     image.crop "%sx%s+%s+%s" % [w - 5, h - 5, x + 3, y + 3]
     image.to_blob
+    
+  end
+  
+  def parse_report(s)
+    
+    report = Rexle.new s[/<Report>.*<\/Report>/m]            
+    session = report.root.element('UserActionData/RecordSession')
+    puts 'session: ' + session.inspect if @debug
+    puts 'attributes: ' + session.attributes.inspect if @debug
+    
+    @start_time, @stop_time = %w(Start Stop).map do |x|
+      v = session.attributes[(x + 'Time').to_sym]
+      puts 'v: ' + v.inspect if @debug
+      v.to_time
+    end
+    
+    session.xpath('EachAction')    
     
   end
 
@@ -220,27 +322,31 @@ EOF
 
       raw_comment = a[0][/User Comment: (.*)/,1]
       
-      n = a[0][/(?<=Step )\d+/]      
+      n = a[0][/(?<=Step )\d+/].to_i
       puts ('n: ' + n.inspect).debug if @debug
+      
+      time = (@actions[n-1].attributes[:Time].to_time - @start_time).to_i
 
-      if raw_comment then        
+      
+      h = if raw_comment then        
         
         {
-          step: n,
-          user_comment: raw_comment.gsub("&quot;",''),
-          screenshot: extract_image(s, n)
+          user_comment: raw_comment.gsub("&quot;",'')          
         }
 
       else
       
         {
-          step: n,
-          desc: a[0][/(?:Step \d+: )(.*)/,1].gsub("&quot;",'"'),
+          desc: a[0][/(?:Step \d+: )(.*)/,1].gsub('&amp;','&')\
+            .gsub("&quot;",'"').sub(/\s+\[[^\[]+\]$/,''),
           keys: keys ,
           program: a[1][/(?<=Program: ).*/],
           ui_elements: a[2][/(?<=UI Elements: ).*/].split(/,\s+/)
         }
       end
+      
+      steps = {step: n, time: time, screenshot: extract_image(s, n)}.merge(h)
+      OpenStruct.new(steps)
 
     end
 
