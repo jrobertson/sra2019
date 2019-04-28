@@ -138,9 +138,7 @@ html
 EOF
 
     html = Rexle.new(Hlt.new(@sliml).to_html)\
-        .root.element('html').xml pretrequire 'requestor'
-eval Requestor.read('http://a0.jamesrobertson.eu/rorb/r/ruby'){|x| x.require 'sra2019' }
-ty: true
+        .root.element('html').xml pretty: true
     File.write File.join(filepath, 'index.html'), html
 
     %w(layout style print).each \

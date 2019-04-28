@@ -1,6 +1,6 @@
 Gem::Specification.new do |s|
   s.name = 'sra2019'
-  s.version = '0.6.0'
+  s.version = '0.6.1'
   s.summary = 'Steps Recorder (MS Windows) Analyser 2019'
   s.authors = ['James Robertson']
   s.files = Dir['lib/sra2019.rb']  
