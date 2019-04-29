@@ -16,6 +16,7 @@ require 'rxfhelper'
 require 'wicked_pdf'
 require 'mini_magick'
 require 'archive/zip'
+require 'pollyspeech'
 require 'rexle-builder'
 
 
@@ -33,7 +34,8 @@ class StepsRecorderAnalyser
   using ColouredText
   using TimeHelper
 
-  attr_reader :steps, :start_time, :stop_time
+  attr_reader :start_time, :stop_time
+  attr_accessor :steps
   
 
   def initialize(s, debug: false, savepath: '/tmp', title: 'Untitled')
@@ -54,8 +56,8 @@ class StepsRecorderAnalyser
     @all_steps = parse_steps  content  
     @doc = build @all_steps
     steps = @all_steps.select {|x| x[:user_comment]}
-    @steps = steps.any? ? steps : @all_steps
-
+    @steps = steps.any? ? steps : tidy(@all_steps)
+    
   end
 
   def import(s)
@@ -64,6 +66,37 @@ class StepsRecorderAnalyser
     @dx.import s
     
   end
+  
+  def tidy(steps)
+
+    verbose_level = 0
+
+    steps.each do |x|
+
+      x.desc.gsub!(/\s*\([^\)]+\)\s*/,'')
+      x.desc.sub!(/ in "\w+"$/,'')
+      
+      if x.desc =~ /User left click/ and verbose_level == 0 then
+
+        x.desc.sub!(/User left click/, 'Using the mouse, left click')
+        verbose_level = 1
+
+      elsif x.desc =~ /User left click/ and verbose_level == 1
+
+        x.desc.sub!(/User left click/, 'Left click')
+        verbose_level = 2
+
+      elsif x.desc =~ /User left click/ and verbose_level == 2
+
+        x.desc.sub!(/User left click/, 'Click')
+
+      else
+        verbose_level = 0
+      end
+
+    end
+    
+  end    
   
   # Returns a Dynarex object
   #
