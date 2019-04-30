@@ -12,6 +12,8 @@ require 'ostruct'
 require 'subunit'
 require 'zip/zip'
 require 'dynarex'
+require 'ogginfo'
+require 'wavefile'
 require 'rxfhelper'
 require 'wicked_pdf'
 require 'mini_magick'
@@ -19,6 +21,47 @@ require 'archive/zip'
 require 'pollyspeech'
 require 'rexle-builder'
 
+
+module WavTool
+  include WaveFile
+    
+  def wav_silence(filename, duration: 1)
+
+    square_cycle = [0] * 100 * duration
+    buffer = Buffer.new(square_cycle, Format.new(:mono, :float, 44100))
+
+    Writer.new(filename, Format.new(:mono, :pcm_16, 22050)) do |writer|
+      220.times { writer.write(buffer) }
+    end
+
+  end
+  
+  def wav_concat(files, save_file='audio.wav')
+    
+    Writer.new(save_file, Format.new(:stereo, :pcm_16, 22050)) do |writer|
+
+      files.each do |file_name|
+
+        Reader.new(file_name).each_buffer(samples_per_buffer=4096) do |buffer|
+          writer.write(buffer)
+        end
+
+      end
+    end
+    
+  end
+  
+  def ogg_to_wav(oggfile, wavfile=oggfile.sub(/\.ogg$/,'.wav'))
+    
+    if block_given? then
+      yield(oggfile)
+    else
+    `oggdec #{oggfile}`
+    end
+    
+  end
+
+end
 
 module TimeHelper
 
@@ -33,14 +76,19 @@ end
 class StepsRecorderAnalyser
   using ColouredText
   using TimeHelper
+  include WavTool
 
-  attr_reader :start_time, :stop_time
+  attr_reader :start_time, :duration
   attr_accessor :steps
   
 
-  def initialize(s, debug: false, savepath: '/tmp', title: 'Untitled')
+  def initialize(s, debug: false, savepath: '/tmp', title: 'Untitled', 
+                 working_dir: '/tmp', pollyspeech: {access_key: nil, 
+                 secret_key: nil, voice_id: 'Amy', 
+                 cache_filepath: '/tmp/pollyspeech/cache'})
 
-    @savepath, @title, @debug = savepath, title, debug
+    @savepath, @title, @working_dir, @debug = savepath, title, 
+        working_dir, debug
     
     raw_content, type = RXFHelper.read(s)
     
@@ -56,7 +104,76 @@ class StepsRecorderAnalyser
     @all_steps = parse_steps  content  
     @doc = build @all_steps
     steps = @all_steps.select {|x| x[:user_comment]}
-    @steps = steps.any? ? steps : tidy(@all_steps)
+    @steps = steps.any? ? steps : @all_steps
+    
+    # find the duration for each step
+    @steps.each.with_index do |x, i|
+      
+      x.duration = if i < @steps.length - 1 then
+        @steps[i+1].time - x.time 
+      else
+        @duration - x.time 
+      end
+      
+    end
+
+    @pollyspeech = PollySpeech.new(pollyspeech) if pollyspeech[:access_key]
+    
+  end
+  
+  # adds the audio track to the video file
+  #
+  def add_audio_track(audio_file, video_file, target_video)
+    
+    if block_given? then
+      yield(audio_file, video_file, target_video)
+    else
+      `ffmpeg -i #{video_file} -i #{audio_file} -codec copy -shortest #{target_video}`
+    end
+    
+  end
+  
+    
+  
+  def generate_audio(wav: true)
+    
+    return nil unless @pollyspeech
+    
+    @steps.each.with_index do |x, i|
+      
+      puts 'x.desc: ' + x.desc.inspect if @debug
+      filename = "voice#{i+1}.ogg"
+      
+      x.audio = filename
+      file = File.join(@working_dir, filename)
+      @pollyspeech.tts(x.desc.force_encoding('UTF-8'), file)
+      
+      x.audio_duration = OggInfo.open(file) {|ogg| ogg.length.to_i }
+      x.silence_duration = x.duration - x.audio_duration
+      
+      if wav then
+        
+        silent_file = File.join(@working_dir, "silence#{(i+1).to_s}.wav")
+        wav_silence silent_file, duration: x.silence_duration        
+        ogg_to_wav File.join(@working_dir, "voice#{i+1}.ogg")            
+        
+      end
+      
+      sleep 0.6
+      
+    end
+    
+    if wav then
+      
+      files = @steps.length.times.flat_map do |n|
+        [
+          File.join(@working_dir, "voice#{n+1}.wav"), 
+          File.join(@working_dir, "silence#{n+1}.wav")
+        ]
+      end
+      
+      wav_concat files, File.join(@working_dir, 'audio.wav')
+    end
     
   end
 
@@ -67,14 +184,15 @@ class StepsRecorderAnalyser
     
   end
   
-  def tidy(steps)
+  def tidy!()
 
     verbose_level = 0
 
-    steps.each do |x|
+    @steps.each do |x|
 
       x.desc.gsub!(/\s*\([^\)]+\)\s*/,'')
       x.desc.sub!(/ in "\w+"$/,'')
+      x.desc.sub!(/"User account for [^"]+"/,'the User account icon.')
       
       if x.desc =~ /User left click/ and verbose_level == 0 then
 
@@ -89,6 +207,11 @@ class StepsRecorderAnalyser
       elsif x.desc =~ /User left click/ and verbose_level == 2
 
         x.desc.sub!(/User left click/, 'Click')
+        verbose_level = 3
+
+      elsif x.desc =~ /User left click/ and verbose_level == 3
+
+        x.desc.sub!(/User left click on/, 'Select')
 
       else
         verbose_level = 0
@@ -117,7 +240,6 @@ class StepsRecorderAnalyser
   end
 
   def to_kbml(options={})
-
 
     @doc.xml options
 
@@ -185,9 +307,9 @@ EOF
     @sliml
   end
   
-  def to_srt()
+  def to_srt(offset=0)
 
-    lines = to_subtitles.strip.lines.map.with_index do |x, i|
+    lines = to_subtitles(offset).strip.lines.map.with_index do |x, i|
 
       raw_times, subtitle = x.split(/ /,2)
       
@@ -206,16 +328,20 @@ EOF
     
   end
   
-  def to_subtitles()
+  def to_subtitles(offset=0)
     
-    times = @all_steps.map(&:time).each_cons(2).map do |x|
+    raw_times = @all_steps.map(&:time)
+    raw_times << raw_times.last + 10
+
+    times = raw_times.each_cons(2).map do |x|
 
       x.map do |sec|
-        a = Subunit.new(units={minutes:60, hours:60}, seconds: sec).to_h.to_a
+        a = Subunit.new(units={minutes:60}, seconds: sec+offset).to_h.to_a
         a.map {|x|"%d%s" % [x[1], x[0][0]] }.join('')
       end.join('-')
       
     end
+    
     times.zip(@all_steps.map(&:desc)).map {|x| x.join(' ')}.join("\n")
                           
   end
@@ -327,11 +453,13 @@ EOF
     puts 'session: ' + session.inspect if @debug
     puts 'attributes: ' + session.attributes.inspect if @debug
     
-    @start_time, @stop_time = %w(Start Stop).map do |x|
+    @start_time, stop_time = %w(Start Stop).map do |x|
       v = session.attributes[(x + 'Time').to_sym]
       puts 'v: ' + v.inspect if @debug
       v.to_time
     end
+    
+    @duration = stop_time - @start_time
     
     session.xpath('EachAction')    
     
