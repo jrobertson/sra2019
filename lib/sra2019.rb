@@ -70,6 +70,12 @@ module TimeHelper
       Time.strptime(self, "%H:%M:%S")
     end
   end
+  
+  refine Integer do
+    def to_hms
+      Subunit.new(units={minutes:60}, seconds: self).to_a
+    end
+  end
 
 end
 
@@ -122,17 +128,58 @@ class StepsRecorderAnalyser
   end
   
   # adds the audio track to the video file
+  # mp4 in avi out
   #
   def add_audio_track(audio_file, video_file, target_video)
     
     if block_given? then
       yield(audio_file, video_file, target_video)
     else
-      `ffmpeg -i #{video_file} -i #{audio_file} -codec copy -shortest #{target_video}`
+      `ffmpeg -i #{video_file} -i #{audio_file} -codec copy -shortest #{target_video} -y`
     end
     
   end
   
+  # mp4 in mp4 out
+  #
+  def add_subtitles(source, destination)
+    
+    
+    subtitles = File.join(@working_dir, 's.srt')
+    File.write subtitles, to_srt()
+    
+    if block_given? then
+      yield(source, subtitles, destination)
+    else
+      `ffmpeg -i #{source} -i #{subtitles} -c copy -c:s mov_text #{destination} -y`
+    end
+    
+  end
+  
+  def build_video(source, destination)
+    
+    dir = File.dirname(source)
+    file = File.basename(source)
+    
+    tidy!
+    
+    vid2 = File.join(dir, file.sub(/\.mp4$/,'b\0'))
+    trim_video source, vid2
+    
+    vid3 = File.join(dir, file.sub(/\.mp4$/,'c.avi'))
+
+    generate_audio
+    add_audio_track File.join(@working_dir, 'audio.wav'), vid2, vid3
+
+    
+    vid4 = File.join(dir, file.sub(/\.avi$/,'d\0'))
+    resize_video vid3, vid4
+    
+    vid5 = File.join(dir, file.sub(/\.mp4$/,'e\0'))
+    transcode_video(vid4, vid5)
+    add_subtitles(vid5, destination)    
+    
+  end  
     
   
   def generate_audio(wav: true)
@@ -149,21 +196,32 @@ class StepsRecorderAnalyser
       @pollyspeech.tts(x.desc.force_encoding('UTF-8'), file)
       
       x.audio_duration = OggInfo.open(file) {|ogg| ogg.length.to_i }
-      x.silence_duration = x.duration - x.audio_duration
+      
+      if @debug then
+        puts ('x.duration: ' + x.duration.inspect).debug
+        puts ('x.audio_duration: ' + x.audio_duration.inspect).debug
+      end
+      
+      duration = x.duration - x.audio_duration
+      x.silence_duration = duration >= 0 ? duration : 0
       
       if wav then
         
         silent_file = File.join(@working_dir, "silence#{(i+1).to_s}.wav")
+        puts 'x.silence_duration: ' + x.silence_duration.inspect if @debug
         wav_silence silent_file, duration: x.silence_duration        
         ogg_to_wav File.join(@working_dir, "voice#{i+1}.ogg")            
         
       end
       
-      sleep 0.6
+      sleep 0.02
       
     end
     
     if wav then
+      
+      intro = File.join(@working_dir, 'intro.wav')
+      wav_silence intro
       
       files = @steps.length.times.flat_map do |n|
         [
@@ -171,6 +229,8 @@ class StepsRecorderAnalyser
           File.join(@working_dir, "silence#{n+1}.wav")
         ]
       end
+      
+      files.prepend intro
       
       wav_concat files, File.join(@working_dir, 'audio.wav')
     end
@@ -182,6 +242,16 @@ class StepsRecorderAnalyser
     @dx = Dynarex.new
     @dx.import s
     
+  end
+  
+  def remove_steps(a)
+    a.each {|n| @steps[n] = nil }
+    @steps.compact!    
+  end
+  
+  # avi in avi out
+  def resize_video(source, destination)
+    `ffmpeg -i #{source} -vf scale="720:-1" #{destination} -y`
   end
   
   def tidy!()
@@ -219,7 +289,28 @@ class StepsRecorderAnalyser
 
     end
     
-  end    
+  end
+  
+  def transcode_video(avi, mp4)
+    
+    if block_given? then
+      yield(avi, mp4)
+    else
+      `ffmpeg -i #{avi} #{mp4} -y`
+    end
+    
+  end
+  
+  def trim_video(video, newvideo)
+    
+    start = @steps.first.time - 4
+    t1, t2 = [start, @steps.last.time - 2 ].map do |step|
+      "%02d:%02d:%02d" % (step.to_hms.reverse + [0,0]).take(3).reverse
+    end
+    
+    `ffmpeg -i #{video} -ss #{t1} -t #{t2} -async 1 #{newvideo} -y`
+    
+  end
   
   # Returns a Dynarex object
   #
@@ -307,17 +398,17 @@ EOF
     @sliml
   end
   
-  def to_srt(offset=0)
+  def to_srt(offset=-(@steps.first.time - 2))
 
     lines = to_subtitles(offset).strip.lines.map.with_index do |x, i|
 
       raw_times, subtitle = x.split(/ /,2)
-      
+      puts ('raw_times: ' + raw_times.inspect).debug if @debug
       start_time, end_time = raw_times.split('-',2)
-      times = [("%02d:%02d:%02d" % ([0, 0 ] + start_time.split(/\D/)\
+      times = [("%02d:%02d:%02d,000" % ([0, 0 ] + start_time.split(/\D/)\
                                     .map(&:to_i)).reverse.take(3).reverse), \
                '-->', \
-              ("%02d:%02d:%02d" % ([0, 0 ] + end_time.split(/\D/).map(&:to_i))\
+              ("%02d:%02d:%02d,000" % ([0, 0 ] + end_time.split(/\D/).map(&:to_i))\
                .reverse.take(3).reverse)].join(' ')
 
       [i+1, times, subtitle].join("\n")
@@ -328,12 +419,12 @@ EOF
     
   end
   
-  def to_subtitles(offset=0)
+  def to_subtitles(offset=-(@steps.first.time - 2))
     
-    raw_times = @all_steps.map(&:time)
-    raw_times << raw_times.last + 10
+    raw_times = @steps.map {|x| [x.time, x.time + x.audio_duration + 1]} 
+    
 
-    times = raw_times.each_cons(2).map do |x|
+    times = raw_times.map do |x|
 
       x.map do |sec|
         a = Subunit.new(units={minutes:60}, seconds: sec+offset).to_h.to_a
@@ -342,7 +433,7 @@ EOF
       
     end
     
-    times.zip(@all_steps.map(&:desc)).map {|x| x.join(' ')}.join("\n")
+    times.zip(@steps.map(&:desc)).map {|x| x.join(' ')}.join("\n")
                           
   end
   
